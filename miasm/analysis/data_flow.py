@@ -17,6 +17,8 @@ from miasm.analysis.ssa import get_phi_sources_parent_block, \
 from miasm.ir.symbexec import get_expr_base_offset
 from collections import deque
 
+from pprint import pprint
+
 class ReachingDefinitions(dict):
     """
     Computes for each assignblock the set of reaching definitions.
@@ -1623,6 +1625,176 @@ class DelDummyPhi(object):
         return modified
 
 
+class DelDummyPhiVar(object):
+    """
+    Del dummy phi
+    Find nodes which are in the same equivalence class and replace phi nodes by
+    the class representative.
+    """
+
+    def src_gen_phi_node_srcs(self, equivalence_graph):
+        for node in equivalence_graph.nodes():
+            if not node.is_op("Phi"):
+                continue
+            phi_successors = equivalence_graph.successors(node)
+            for head in phi_successors:
+                # Walk from head to find if we have a phi merging node
+                known = set([node])
+                todo = set([head])
+                done = set()
+                while todo:
+                    node = todo.pop()
+                    if node in done:
+                        continue
+
+                    known.add(node)
+                    is_ok = True
+                    for parent in equivalence_graph.predecessors(node):
+                        if parent not in known:
+                            is_ok = False
+                            break
+                    if not is_ok:
+                        continue
+                    if node.is_op("Phi"):
+                        successors = equivalence_graph.successors(node)
+                        phi_node = successors.pop()
+                        return set([phi_node]), phi_node, head, equivalence_graph
+                    done.add(node)
+                    for successor in equivalence_graph.successors(node):
+                        todo.add(successor)
+        return None
+
+    def get_equivalence_class(self, node, ids_to_src):
+        todo = set([node])
+        done = set()
+        defined = set()
+        equivalence = set()
+        src_to_dst = {}
+        equivalence_graph = DiGraph()
+        while todo:
+            dst = todo.pop()
+            if dst in done:
+                continue
+            done.add(dst)
+            equivalence.add(dst)
+            src = ids_to_src.get(dst)
+            if src is None:
+                # Node is not defined
+                continue
+            src_to_dst[src] = dst
+            defined.add(dst)
+            if src.is_var():
+                equivalence_graph.add_uniq_edge(src, dst)
+                todo.add(src)
+            elif src.is_op('Phi'):
+                equivalence_graph.add_uniq_edge(src, dst)
+                for arg in src.args:
+                    assert arg.is_var()
+                    equivalence_graph.add_uniq_edge(arg, src)
+                    todo.add(arg)
+            else:
+                if src.is_mem() or (src.is_op() and src.op.startswith("call")):
+                    if src in equivalence_graph.nodes():
+                        return None
+                equivalence_graph.add_uniq_edge(src, dst)
+                equivalence.add(src)
+
+        if len(equivalence_graph.heads()) == 0:
+            raise RuntimeError("Inconsistent graph")
+        elif len(equivalence_graph.heads()) == 1:
+            # Every nodes in the equivalence graph may be equivalent to the root
+            head = equivalence_graph.heads().pop()
+            successors = equivalence_graph.successors(head)
+            if len(successors) == 1:
+                # If successor is an id
+                successor = successors.pop()
+                if successor.is_var():
+                    nodes = equivalence_graph.nodes()
+                    nodes.discard(head)
+                    nodes.discard(successor)
+                    nodes = [node for node in nodes if node.is_var()]
+                    return nodes, successor, head, equivalence_graph
+            else:
+                # Walk from head to find if we have a phi merging node
+                known = set()
+                todo = set([head])
+                done = set()
+                while todo:
+                    node = todo.pop()
+                    if node in done:
+                        continue
+                    known.add(node)
+                    is_ok = True
+                    for parent in equivalence_graph.predecessors(node):
+                        if parent not in known:
+                            is_ok = False
+                            break
+                    if not is_ok:
+                        continue
+                    if node.is_op("Phi"):
+                        successors = equivalence_graph.successors(node)
+                        assert len(successors) == 1
+                        phi_node = successors.pop()
+                        return set([phi_node]), phi_node, head, equivalence_graph
+                    done.add(node)
+                    for successor in equivalence_graph.successors(node):
+                        todo.add(successor)
+
+        return self.src_gen_phi_node_srcs(equivalence_graph)
+
+    def del_dummy_phi(self, ssa, head):
+        ids_to_src = {}
+        def_to_loc = {}
+        for block in viewvalues(ssa.graph.blocks):
+            for index, assignblock in enumerate(block):
+                for dst, src in viewitems(assignblock):
+                    if not dst.is_var():
+                        continue
+                    ids_to_src[dst] = src
+                    def_to_loc[dst] = block.loc_key
+
+
+        modified = False
+        for loc_key in ssa.graph.blocks.keys():
+            block = ssa.graph.blocks[loc_key]
+            if not irblock_has_phi(block):
+                continue
+            assignblk = block[0]
+            for dst, phi_src in viewitems(assignblk):
+                assert phi_src.is_op('Phi')
+                result = self.get_equivalence_class(dst, ids_to_src)
+                if result is None:
+                    continue
+                defined, node, true_value, equivalence_graph = result
+                if expr_has_mem(true_value):
+                    # Don't propagate ExprMem
+                    continue
+                if true_value.is_op() and true_value.op.startswith("call"):
+                    # Don't propagate call
+                    continue
+                # We have an equivalence of nodes
+                to_del = set(defined)
+                # Remove all implicated phis
+                for dst in to_del:
+                    loc_key = def_to_loc[dst]
+                    block = ssa.graph.blocks[loc_key]
+
+                    assignblk = block[0]
+                    fixed_phis = {}
+                    for old_dst, old_phi_src in viewitems(assignblk):
+                        if old_dst in defined:
+                            continue
+                        fixed_phis[old_dst] = old_phi_src
+
+                    assignblks = list(block)
+                    assignblks[0] = AssignBlock(fixed_phis, assignblk.instr)
+                    assignblks[1:1] = [AssignBlock({dst: true_value}, assignblk.instr)]
+                    new_irblock = IRBlock(block.loc_db, block.loc_key, assignblks)
+                    ssa.graph.blocks[loc_key] = new_irblock
+                modified = True
+        return modified
+
+
 def replace_expr_from_bottom(expr_orig, dct):
     def replace(expr):
         if expr in dct:
@@ -1914,7 +2086,6 @@ class State(object):
         @dsts: Set of Expressions
         @src: expression to test
         """
-
         srcs = src.get_r()
         for src in srcs:
             for dst in dsts:
@@ -2087,7 +2258,7 @@ class State(object):
             if self.may_interfer(dsts, node):
                 # Interfere with known equivalence class
                 self.equivalence_classes.del_element(node)
-                if node.is_id() or node.is_mem():
+                if node.is_id() or node.is_mem() or node.is_var():
                     self.undefined.add(node)
 
 
@@ -2101,14 +2272,13 @@ class State(object):
                     to_del.add(node)
             for node in to_del:
                 self.equivalence_classes.del_element(node)
-                if node.is_id() or node.is_mem():
+                if node.is_id() or node.is_mem() or node.is_var():
                     self.undefined.add(node)
-
             # Don't create equivalence if self interfer
             if self.may_interfer(dsts, src):
                 if dst in self.equivalence_classes.nodes():
                     self.equivalence_classes.del_element(dst)
-                    if dst.is_id() or dst.is_mem():
+                    if dst.is_id() or dst.is_mem() or node.is_var():
                         self.undefined.add(dst)
                 continue
 
@@ -2134,8 +2304,8 @@ class State(object):
         classes1 = self.equivalence_classes
         classes2 = other.equivalence_classes
 
-        undefined = set(node for node in self.undefined if node.is_id() or node.is_mem())
-        undefined.update(set(node for node in other.undefined if node.is_id() or node.is_mem()))
+        undefined = set(node for node in self.undefined if node.is_id() or node.is_mem() or node.is_var())
+        undefined.update(set(node for node in other.undefined if node.is_id() or node.is_mem() or node.is_var()))
         # Should we compute interference between srcs and undefined ?
         # Nop => should already interfere in other state
         components1 = classes1.get_classes()
@@ -2156,7 +2326,7 @@ class State(object):
                     continue
                 component2 = node_to_component2.get(node)
                 if component2 is None:
-                    if node.is_id() or node.is_mem():
+                    if node.is_id() or node.is_mem() or node.is_var():
                         assert(node not in nodes_ok)
                         undefined.add(node)
                     continue
@@ -2166,7 +2336,7 @@ class State(object):
                 common = component1.intersection(component2)
                 if len(common) == 1:
                     # Intersection contains only one node => undefine node
-                    if node.is_id() or node.is_mem():
+                    if node.is_id() or node.is_mem() or node.is_var():
                         assert(node not in nodes_ok)
                         undefined.add(node)
                         component2.discard(common.pop())
@@ -2185,7 +2355,7 @@ class State(object):
         # Discard remaining components2 elements
         for component in components2:
             for node in component:
-                if node.is_id() or node.is_mem():
+                if node.is_id() or node.is_mem() or node.is_var():
                     assert(node not in nodes_ok)
                     undefined.add(node)
 

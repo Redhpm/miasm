@@ -77,6 +77,11 @@ class TranslatorHtml(Translator):
         out = '<font color="%s">%s</font>' % (utils.COLOR_ID, out)
         return out
 
+    def from_ExprVar(self, expr):
+        out = str(expr)
+        out = '<font color="%s">%s</font>' % (utils.COLOR_VAR, out)
+        return out
+
     def from_ExprLoc(self, expr):
 
         if self.loc_db is None:
@@ -272,7 +277,7 @@ class AssignBlock(object):
             new_src = m2_expr.ExprCompose(*args)
 
         # Sanity check
-        if not isinstance(new_dst, (m2_expr.ExprId, m2_expr.ExprMem)):
+        if not isinstance(new_dst, (m2_expr.ExprId, m2_expr.ExprMem, m2_expr.ExprVar)):
             raise TypeError("Destination cannot be a %s" % type(new_dst))
 
         self._assigns[new_dst] = new_src

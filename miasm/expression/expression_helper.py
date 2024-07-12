@@ -622,6 +622,9 @@ def possible_values(expr):
             consvals.add(
                 ConstrainedValue(frozenset(args_constraint),
                                  m2_expr.ExprCompose(*args)))
+            
+    elif isinstance(expr, m2_expr.ExprVar):
+        consvals = possible_values(expr.value)
     else:
         raise RuntimeError("Unsupported type for expr: %s" % type(expr))
 

@@ -97,6 +97,12 @@ class Translator(object):
         """
         raise NotImplementedError("Abstract method")
 
+    def from_ExprVar(self, expr):
+        """Translate an ExprVar
+        @expr: ExprVar to translate
+        """
+        raise NotImplementedError("Abstract method")
+
     def from_expr(self, expr):
         """Translate an expression according to its type
         @expr: expression to translate
@@ -115,7 +121,8 @@ class Translator(object):
             m2_expr.ExprOp: self.from_ExprOp,
             m2_expr.ExprMem: self.from_ExprMem,
             m2_expr.ExprAssign: self.from_ExprAssign,
-            m2_expr.ExprCond: self.from_ExprCond
+            m2_expr.ExprCond: self.from_ExprCond,
+            m2_expr.ExprVar: self.from_ExprVar,
         }
         for target, handler in viewitems(handlers):
             if isinstance(expr, target):

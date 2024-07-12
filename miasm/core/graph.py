@@ -1,4 +1,5 @@
 from collections import defaultdict, namedtuple
+from functools import reduce
 
 from future.utils import viewitems, viewvalues
 import re
@@ -294,7 +295,7 @@ class DiGraph(object):
 
             out.append('%s -> %s' % (self.nodeid(src), self.nodeid(dst)) +
                        '[' + attrs + '];')
-
+        # out.append("splines=\"ortho\"")
         out.append("}")
         return '\n'.join(out)
 
@@ -561,6 +562,41 @@ class DiGraph(object):
                     break
         return idoms
 
+    def compute_immediate_dominators_fast(self, head):
+
+        idoms = {head: head}
+        rev_order = []
+        node_to_post_order = {}
+
+        for i, b in enumerate(self.walk_dfs_post_order(head)):
+            rev_order.append(b)
+            node_to_post_order[b] = i
+
+        rev_order.pop()
+        rev_order.reverse()
+
+        def intersect(b1, b2):
+            while b1 != b2:
+                while node_to_post_order[b1] < node_to_post_order[b2]: 
+                    b1 = idoms[b1]
+                while node_to_post_order[b2] < node_to_post_order[b1]:
+                    b2 = idoms[b2]
+            return b1
+
+        changed = True
+        while changed:
+            changed = False
+            for u in rev_order:
+                new_idom = reduce(intersect, (v for v in self.predecessors_iter(u) if v in idoms))
+                if u not in idoms or idoms[u] != new_idom:
+                    idoms[u] = new_idom
+                    changed = True
+       
+
+        del idoms[head] # consistency with miasm
+        return idoms
+    
+
     def compute_immediate_postdominators(self,tail):
         """Compute the immediate postdominators of the graph"""
         postdominators = self.compute_postdominators(tail)
@@ -636,6 +672,17 @@ class DiGraph(object):
     def walk_depth_first_backward(self, head):
         """Performs a depth first search on the reversed graph from @head"""
         return self._walk_generic_first(head, -1, self.predecessors_iter)
+
+    def walk_dfs_post_order(self, head, visited=None):
+        if visited is None:
+            visited = set()
+        visited |= {head}
+        
+        for b in self.successors_iter(head):
+            if b not in visited:
+                yield from self.walk_dfs_post_order(b, visited)
+
+        yield head
 
     def has_loop(self):
         """Return True if the graph contains at least a cycle"""

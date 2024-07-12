@@ -62,6 +62,7 @@ EXPRMEM = 6
 EXPROP = 7
 EXPRSLICE = 8
 EXPRCOMPOSE = 9
+EXPRVAR = 10
 
 
 priorities_list = [
@@ -80,7 +81,7 @@ PRIORITY_MAX = len(priorities_list) - 1
 def should_parenthesize_child(child, parent):
     if (isinstance(child, ExprId) or isinstance(child, ExprInt) or
         isinstance(child, ExprCompose) or isinstance(child, ExprMem) or
-        isinstance(child, ExprSlice)):
+        isinstance(child, ExprSlice) or isinstance(child, ExprVar)):
         return False
     elif isinstance(child, ExprOp) and not child.is_infix():
         return False
@@ -252,6 +253,11 @@ class ExprWalkBase(object):
                 ret = self.visit(arg, *args, **kwargs)
                 if ret:
                     return ret
+        elif expr.is_var():
+            pass # je sais pas mais ptet
+            # ret = self.visit(expr.value, *args, **kwargs)
+            # if ret:
+            #     return ret
         else:
             raise TypeError("Visitor can only take Expr")
 
@@ -281,7 +287,7 @@ class ExprWalk(ExprWalkBase):
 
 class ExprGetR(ExprWalkBase):
     """
-    Return ExprId/ExprMem used by a given expression
+    Return ExprId/ExprMem/ExprVar used by a given expression
     """
     def __init__(self, mem_read=False, cst_read=False):
         super(ExprGetR, self).__init__(lambda x:None)
@@ -296,6 +302,8 @@ class ExprGetR(ExprWalkBase):
         elif expr.is_mem():
             self.elements.add(expr)
         elif expr.is_id():
+            self.elements.add(expr)
+        elif expr.is_var():
             self.elements.add(expr)
 
     def visit(self, expr, *args, **kwargs):
@@ -354,6 +362,9 @@ class ExprVisitorBase(object):
         elif expr.is_compose():
             args = [self.visit(arg, *args, **kwargs) for arg in expr.args]
             ret = ExprCompose(*args)
+        elif expr.is_var():
+            value = self.visit(expr.value, *args, **kwargs)
+            ret = ExprVar(expr.name, expr.address_space, value, expr.version, expr.free)
         else:
             raise TypeError("Visitor can only take Expr")
         return ret
@@ -552,6 +563,7 @@ class Expr(object):
             return False
         if hash(self) != hash(other):
             return False
+        
         return repr(self) == repr(other)
 
     def __ne__(self, other):
@@ -702,6 +714,12 @@ class Expr(object):
 
     def is_compose(self):
         return False
+    
+    def is_var(self, value=None):
+        False
+
+    def is_free_var(self):
+        False
 
     def is_op_segm(self):
         """Returns True if is ExprOp and op == 'segm'"""
@@ -1132,11 +1150,11 @@ class ExprMem(Expr):
         self._ptr = ptr
 
     def get_arg(self):
-        warnings.warn('DEPRECATION WARNING: use exprmem.ptr instead of exprmem.arg')
+        # warnings.warn('DEPRECATION WARNING: use exprmem.ptr instead of exprmem.arg')
         return self.ptr
 
     def set_arg(self, value):
-        warnings.warn('DEPRECATION WARNING: use exprmem.ptr instead of exprmem.arg')
+        # warnings.warn('DEPRECATION WARNING: use exprmem.ptr instead of exprmem.arg')
         self.ptr = value
 
     ptr = property(lambda self: self._ptr)
@@ -1497,6 +1515,46 @@ class ExprCompose(Expr):
 
     def is_compose(self):
         return True
+    
+
+class ExprVar(Expr):
+
+    __slots__ = Expr.__slots__ + ["id", "name", "address_space", "version", "value", "free"]
+
+    def __init__(self, name: str, address_space: str, value: ExprMem | ExprId, version: int | None, free: bool):
+        self.name = name
+        self.address_space = address_space
+        self.version = version
+
+        self.value = value
+        self.free = free
+        super(ExprVar, self).__init__(value.size)
+        
+
+    def __str__(self) -> str:
+        if self.version is None:
+            return f"{self.address_space}_{self.name}_{self.value.size}"
+        else:
+            return f"{self.address_space}_{self.name}_{self.value.size}_{self.version}"
+        
+    def __new__(cls, name: str, address_space: str, value: ExprMem | ExprId, version, free):
+        return Expr.get_object(cls, (name, address_space, value, version, free))
+
+    def is_var(self, value=None) -> bool:
+        if value is None:
+            return True
+        else:
+            return self.value == value
+    
+    def is_free_var(self) -> bool:
+        return self.free
+
+    def _exprhash(self) -> int:
+        return hash((EXPRVAR, self.name, self.address_space, self.value, self.version, self.free))
+    
+    def _exprrepr(self) -> str:
+        return f"ExprVar({self.name!r}, {self.address_space!r}, {self.value!r}, {self.version!r}, {self.free!r})"
+
 
 # Expression order for comparison
 EXPR_ORDER_DICT = {
@@ -1507,7 +1565,8 @@ EXPR_ORDER_DICT = {
     ExprOp: 5,
     ExprSlice: 6,
     ExprCompose: 7,
-    ExprInt: 8,
+    ExprVar: 8,
+    ExprInt: 9,
 }
 
 
@@ -1605,6 +1664,9 @@ def compare_exprs(expr1, expr2):
         return ret
     elif cls1 == ExprCompose:
         return compare_expr_list_compose(expr1.args, expr2.args)
+    
+    elif cls1 == ExprVar:
+        return compare_exprs(expr1.value, expr2.value)
     raise NotImplementedError(
         "Comparison between %r %r not implemented" % (expr1, expr2)
     )
@@ -1853,6 +1915,20 @@ def get_list_rw(exprs, mem_read=False, cst_read=True):
         list_rw.append((o_r, o_w))
 
     return list_rw
+
+
+def get_free_expr_vars(expr: Expr):
+    """Retrieve free ExprVar of an @expr
+    @expr: Expr"""
+    def visit_getfreevars(expr, out=None):
+        if out is None:
+            out = set()
+        if expr.is_free_var():
+            out.add(expr)
+        return expr
+    freevars = set()
+    expr.visit(lambda x: visit_getfreevars(x, freevars))
+    return freevars
 
 
 def get_expr_ops(expr):

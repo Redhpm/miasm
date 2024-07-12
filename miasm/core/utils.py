@@ -23,6 +23,7 @@ COLOR_MEM = "deeppink4"
 COLOR_OP_FUNC = "blue1"
 COLOR_LOC = "darkslateblue"
 COLOR_OP = "black"
+COLOR_VAR = "fuchsia"
 
 COLOR_MNEMO = "blue1"
 
